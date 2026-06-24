@@ -4,6 +4,7 @@ import json
 import time
 import re
 import asyncio
+import threading
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
@@ -31,6 +32,13 @@ users_db = {}
 start_time = time.time()
 
 # ═══════════════════════════════════════
+#  СТАТИСТИКА КЛЮЧЕЙ
+# ═══════════════════════════════════════
+key_stats = {}  # {key: {"user_id": 123, "username": "name", "activated": "2026-06-24", "expiry": "..."}}
+active_sessions = {}  # {user_id: {"key": "TOOL-XXX", "started": 1234567890}}
+STATS_FILE = "stats.json"
+
+# ═══════════════════════════════════════
 #  ПРОВЕРКА ПРАВ
 # ═══════════════════════════════════════
 def is_admin(user_id):
@@ -53,7 +61,66 @@ def log_action(text):
 
 def get_reseller_cooldown(user_id):
     return reseller_cooldowns.get(user_id, DEFAULT_COOLDOWN)
-  # ═══════════════════════════════════════
+
+# ═══════════════════════════════════════
+#  СОХРАНЕНИЕ СТАТИСТИКИ
+# ═══════════════════════════════════════
+def save_stats():
+    try:
+        with open(STATS_FILE, "w", encoding="utf-8") as f:
+            json.dump({
+                "key_stats": key_stats,
+                "active_sessions": active_sessions,
+                "user_last_key": user_last_key,
+                "users_db": users_db
+            }, f, indent=4, ensure_ascii=False)
+    except:
+        pass
+
+def load_stats():
+    global key_stats, active_sessions, user_last_key, users_db
+    try:
+        with open(STATS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            key_stats.update(data.get("key_stats", {}))
+            active_sessions.update(data.get("active_sessions", {}))
+            user_last_key.update(data.get("user_last_key", {}))
+            users_db.update(data.get("users_db", {}))
+    except:
+        pass
+
+# ═══════════════════════════════════════
+#  ОТСЛЕЖИВАНИЕ АКТИВАЦИИ
+# ═══════════════════════════════════════
+def track_key_activation(user_id, username, key, expiry):
+    key_stats[key] = {
+        "user_id": user_id,
+        "username": username or f"ID{user_id}",
+        "activated": datetime.now().strftime("%d.%m.%Y %H:%M"),
+        "expiry": expiry
+    }
+    active_sessions[user_id] = {
+        "key": key,
+        "started": time.time()
+    }
+    log_action(f"🔑 Ключ {key} активирован пользователем {username} ({user_id})")
+    save_stats()
+
+# ═══════════════════════════════════════
+#  ПИНГ ДЛЯ RENDER (ЧТОБЫ НЕ ЗАСЫПАЛ)
+# ═══════════════════════════════════════
+def ping_self():
+    url = "https://telegram-bot-4exc.onrender.com"
+    while True:
+        try:
+            response = requests.get(url, timeout=10)
+            print(f"✅ Пинг успешен! Статус: {response.status_code}")
+        except Exception as e:
+            print(f"❌ Ошибка пинга: {e}")
+        time.sleep(600)
+
+threading.Thread(target=ping_self, daemon=True).start()
+# ═══════════════════════════════════════
 #  КОМАНДА /start
 # ═══════════════════════════════════════
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -94,6 +161,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("⚙️ Настройка задержки", callback_data="cooldown_settings")],
             [InlineKeyboardButton("💾 Бэкап ключей", callback_data="backup_keys")],
             [InlineKeyboardButton("📊 Статус сервера", callback_data="server_status")],
+            [InlineKeyboardButton("📊 Активации ключей", callback_data="key_stats_admin")],
             [InlineKeyboardButton("ℹ️ Инфо о ключе", callback_data="info_key")],
             [InlineKeyboardButton("📤 Отправить ключ", callback_data="send_key")],
         ]
@@ -114,7 +182,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
-            f"🤖 Добро пожаловать, Гитлер!\n\n"
+            f"🤖 Добро пожаловать, Реселлер!\n\n"
             f"✅ Генерировать ключи (до 30 дней, задержка {cooldown_min} мин)\n"
             f"✅ Создавать кастомные ключи (до 67 дней, задержка {cooldown_min} мин)\n"
             f"✅ Смотреть свои ключи\n"
@@ -144,8 +212,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📢 Скрипт в Telegram: @MultiToolRubg\n\n"
         "Хочешь получить ключ на 2 часа?\nНажми 'Продолжить'.",
         reply_markup=reply_markup
-      )
-  # ═══════════════════════════════════════
+    )
+# ═══════════════════════════════════════
 #  ПОЛУЧИТЬ БЕСПЛАТНЫЙ КЛЮЧ
 # ═══════════════════════════════════════
 async def get_free_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -170,6 +238,8 @@ async def get_free_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if "key" in data:
             key = data['key']
             user_last_key[user_id] = now
+            username = query.from_user.username or f"ID{user_id}"
+            track_key_activation(user_id, username, key, data['expiry'])
             await query.edit_message_text(
                 f"🎉 Держи!\n\n🔑 Ключ: <code>{key}</code>\n⏳ Активен: 2 часа\n📅 Истекает: {data['expiry']}\n\n❤️ Приятной игры!",
                 parse_mode="HTML"
@@ -278,7 +348,7 @@ async def generate_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"❌ Ошибка: {data.get('error', 'Unknown error')}")
     except Exception as e:
         await query.edit_message_text(f"❌ Ошибка: {str(e)}")
-      # ═══════════════════════════════════════
+# ═══════════════════════════════════════
 #  КАСТОМНЫЙ КЛЮЧ (АДМИН)
 # ═══════════════════════════════════════
 async def admin_custom_key_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -421,7 +491,7 @@ async def reseller_days_callback(update: Update, context: ContextTypes.DEFAULT_T
             await query.edit_message_text(f"❌ Ошибка: {data.get('error', 'Unknown error')}")
     except Exception as e:
         await query.edit_message_text(f"❌ Ошибка: {str(e)}")
-      # ═══════════════════════════════════════
+# ═══════════════════════════════════════
 #  МОИ КЛЮЧИ (РЕСЕЛЛЕР)
 # ═══════════════════════════════════════
 async def my_keys(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -601,8 +671,8 @@ async def cooldown_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
     log_action(f"Админ {query.from_user.id} установил задержку {value} для {target_id}")
-  # ═══════════════════════════════════════
-#  ДОБАВИТЬ РЕСЕЛЛЕРА
+# ═══════════════════════════════════════
+#  УПРАВЛЕНИЕ РЕСЕЛЛЕРАМИ
 # ═══════════════════════════════════════
 async def add_reseller_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -640,9 +710,6 @@ async def handle_add_reseller(update: Update, context: ContextTypes.DEFAULT_TYPE
     except:
         pass
 
-# ═══════════════════════════════════════
-#  МОИ РЕСЕЛЛЕРЫ (АДМИН)
-# ═══════════════════════════════════════
 async def my_resellers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -661,9 +728,6 @@ async def my_resellers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back")]]
     await query.edit_message_text(message, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# ═══════════════════════════════════════
-#  УДАЛИТЬ РЕСЕЛЛЕРА
-# ═══════════════════════════════════════
 async def remove_reseller_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -702,9 +766,9 @@ async def remove_reseller_callback(update: Update, context: ContextTypes.DEFAULT
     except:
         pass
     keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back")]]
-    await query.edit_message_text(f"✅ Реселлер <code>{target_id}</code> успешно удалён!\n\n📩 Ему отправлено уведомление.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
-  # ═══════════════════════════════════════
-#  СПИСОК ВСЕХ КЛЮЧЕЙ (АДМИН)
+    await query.edit_message_text(f"✅ Реселлер <code>{target_id}</code> успешно удалён!\n\n📩 Ему отправлено уведомление.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))	
+# ═══════════════════════════════════════
+#  СПИСОК, УДАЛЕНИЕ, СБРОС, ИНФО, ОТПРАВКА
 # ═══════════════════════════════════════
 async def list_keys(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -731,9 +795,6 @@ async def list_keys(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await query.edit_message_text(f"❌ Ошибка: {str(e)}")
 
-# ═══════════════════════════════════════
-#  УДАЛИТЬ КЛЮЧ (АДМИН)
-# ═══════════════════════════════════════
 async def delete_key_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -763,9 +824,6 @@ async def handle_delete_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка: {str(e)}")
 
-# ═══════════════════════════════════════
-#  УДАЛИТЬ ВСЕ КЛЮЧИ (АДМИН)
-# ═══════════════════════════════════════
 async def delete_all_keys(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -819,9 +877,6 @@ async def confirm_delete_all(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception as e:
         await query.edit_message_text(f"❌ Ошибка: {str(e)}")
 
-# ═══════════════════════════════════════
-#  СБРОСИТЬ КЛЮЧ (АДМИН)
-# ═══════════════════════════════════════
 async def reset_key_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -867,9 +922,6 @@ async def handle_reset_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка: {str(e)}")
 
-# ═══════════════════════════════════════
-#  ИНФО О КЛЮЧЕ (АДМИН)
-# ═══════════════════════════════════════
 async def info_key_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -912,9 +964,6 @@ async def handle_info_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка: {str(e)}")
 
-# ═══════════════════════════════════════
-#  ОТПРАВИТЬ КЛЮЧ (АДМИН)
-# ═══════════════════════════════════════
 async def send_key_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -991,262 +1040,8 @@ async def send_days_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await query.edit_message_text(f"❌ Ошибка: {data.get('error', 'Unknown error')}")
     except Exception as e:
         await query.edit_message_text(f"❌ Ошибка: {str(e)}")
-      # ═══════════════════════════════════════
-#  СТАТИСТИКА (АДМИН)
 # ═══════════════════════════════════════
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if not is_admin(query.from_user.id):
-        await query.edit_message_text("❌ Только для админа!")
-        return
-    try:
-        response = requests.get(f"{SERVER_URL}/list")
-        data = response.json()
-        total = len(data)
-        active = sum(1 for k in data if k.get("active", False))
-        inactive = total - active
-        expired = 0
-        for item in data:
-            if item.get("expiry"):
-                expiry_date = datetime.fromisoformat(item["expiry"].replace('Z', '+00:00'))
-                if datetime.now() > expiry_date:
-                    expired += 1
-        message = f"📊 <b>Статистика</b>\n\n📦 Всего: {total}\n✅ Активных: {active}\n❌ Неактивных: {inactive}\n⏳ Истекли: {expired}"
-        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back")]]
-        await query.edit_message_text(message, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
-        log_action(f"Админ {query.from_user.id} посмотрел статистику")
-    except Exception as e:
-        await query.edit_message_text(f"❌ Ошибка: {str(e)}")
-
-async def reseller_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if not is_reseller(query.from_user.id):
-        await query.edit_message_text("❌ Только для реселлеров!")
-        return
-    try:
-        response = requests.get(f"{SERVER_URL}/list")
-        data = response.json()
-        total = len(data)
-        active = sum(1 for k in data if k.get("active", False))
-        inactive = total - active
-        expired = 0
-        for item in data:
-            if item.get("expiry"):
-                expiry_date = datetime.fromisoformat(item["expiry"].replace('Z', '+00:00'))
-                if datetime.now() > expiry_date:
-                    expired += 1
-        message = f"📊 <b>Статистика</b>\n\n📦 Всего: {total}\n✅ Активных: {active}\n❌ Неактивных: {inactive}\n⏳ Истекли: {expired}"
-        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back")]]
-        await query.edit_message_text(message, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
-        log_action(f"Реселлер {query.from_user.id} посмотрел статистику")
-    except Exception as e:
-        await query.edit_message_text(f"❌ Ошибка: {str(e)}")
-
-# ═══════════════════════════════════════
-#  АНАЛИТИКА КЛЮЧЕЙ (АДМИН)
-# ═══════════════════════════════════════
-async def key_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if not is_admin(query.from_user.id):
-        await query.edit_message_text("❌ Только для админа!")
-        return
-    try:
-        response = requests.get(f"{SERVER_URL}/list")
-        data = response.json()
-        total = len(data)
-        active = sum(1 for k in data if k.get("active", False))
-        now = datetime.now()
-        today = 0
-        week = 0
-        for item in data:
-            if item.get("expiry"):
-                try:
-                    created = datetime.fromisoformat(item["expiry"].replace('Z', '+00:00')) - timedelta(days=30)
-                    if created.date() == now.date():
-                        today += 1
-                    if (now - created).days <= 7:
-                        week += 1
-                except:
-                    pass
-        message = f"📈 <b>Аналитика ключей</b>\n\n"
-        message += f"📦 Всего: {total}\n"
-        message += f"✅ Активных: {active}\n"
-        message += f"📅 Создано сегодня: {today}\n"
-        message += f"📅 За неделю: {week}\n"
-        message += f"📊 Активность: {round((active/total)*100 if total > 0 else 0, 1)}%"
-        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back")]]
-        await query.edit_message_text(message, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
-        log_action(f"Админ {query.from_user.id} посмотрел аналитику")
-    except Exception as e:
-        await query.edit_message_text(f"❌ Ошибка: {str(e)}")
-
-# ═══════════════════════════════════════
-#  ТОП ПОЛЬЗОВАТЕЛЕЙ (АДМИН) - ИСПРАВЛЕННЫЙ
-# ═══════════════════════════════════════
-async def top_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if not is_admin(query.from_user.id):
-        await query.edit_message_text("❌ Только для админа!")
-        return
-    
-    # Считаем ключи по пользователям из логов
-    user_keys_count = {}
-    for log in LOGS:
-        if "получил бесплатный ключ" in log or "создал ключ" in log:
-            # Ищем ID пользователя в логе
-            match = re.search(r'ID(\d+)', log)
-            if match:
-                uid = int(match.group(1))
-                user_keys_count[uid] = user_keys_count.get(uid, 0) + 1
-    
-    if not user_keys_count:
-        await query.edit_message_text("📊 Пока нет данных.")
-        return
-    
-    sorted_users = sorted(user_keys_count.items(), key=lambda x: x[1], reverse=True)
-    message = "🏆 <b>ТОП ПОЛЬЗОВАТЕЛЕЙ</b>\n\n"
-    for i, (uid, count) in enumerate(sorted_users[:10], 1):
-        username = users_db.get(uid, {}).get("username", f"ID{uid}")
-        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-        message += f"{medal} {username} — {count} ключей\n"
-    
-    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back")]]
-    await query.edit_message_text(message, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
-    log_action(f"Админ {query.from_user.id} посмотрел топ пользователей")
-
-# ═══════════════════════════════════════
-#  ЛОГИ (АДМИН)
-# ═══════════════════════════════════════
-async def logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if not is_admin(query.from_user.id):
-        await query.edit_message_text("❌ Только для админа!")
-        return
-    if not LOGS:
-        await query.edit_message_text("📭 Логов нет.")
-        return
-    message = "📝 <b>Логи:</b>\n\n" + "\n".join(LOGS[-20:])
-    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back")]]
-    await query.edit_message_text(message, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
-
-# ═══════════════════════════════════════
-#  ПОЛЬЗОВАТЕЛИ (АДМИН)
-# ═══════════════════════════════════════
-async def users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if not is_admin(query.from_user.id):
-        await query.edit_message_text("❌ Только для админа!")
-        return
-    now = time.time()
-    total = len(users_db)
-    online_count = sum(1 for uid, data in users_db.items() if (now - data.get("last_active", 0)) < 1800)
-    offline_count = total - online_count
-    message = f"👥 <b>ПОЛЬЗОВАТЕЛИ</b>\n\n📊 Всего: <b>{total}</b> | 🟢 Онлайн: <b>{online_count}</b> | ⚫ Оффлайн: <b>{offline_count}</b>\n\n"
-    for i, (uid, data) in enumerate(list(users_db.items())[:20], 1):
-        username = data.get("username", f"ID{uid}")
-        is_online = (now - data.get("last_active", 0)) < 1800
-        status = "🟢" if is_online else "⚫"
-        minutes_ago = int((now - data.get("last_active", 0)) // 60)
-        active_str = "🟢 Онлайн" if is_online else f"⏳ {minutes_ago} мин назад"
-        message += f"{status} {username}\n   🆔 <code>{uid}</code> | {active_str}\n\n"
-    if len(users_db) > 20:
-        message += f"... и ещё {len(users_db) - 20} пользователей"
-    keyboard = [
-        [InlineKeyboardButton("🟢 Онлайн", callback_data="users_online"), InlineKeyboardButton("⚫ Оффлайн", callback_data="users_offline")],
-        [InlineKeyboardButton("📊 Все", callback_data="users_all")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="back")],
-    ]
-    await query.edit_message_text(message, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
-    log_action(f"Админ {query.from_user.id} посмотрел список пользователей")
-
-async def users_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if not is_admin(query.from_user.id):
-        await query.edit_message_text("❌ Только для админа!")
-        return
-    filter_type = query.data.split("_")[1]
-    now = time.time()
-    filtered = []
-    for uid, data in users_db.items():
-        is_online = (now - data.get("last_active", 0)) < 1800
-        if filter_type == "online" and not is_online:
-            continue
-        if filter_type == "offline" and is_online:
-            continue
-        filtered.append((uid, data))
-    title = "🟢 Онлайн" if filter_type == "online" else "⚫ Оффлайн" if filter_type == "offline" else "📊 Все"
-    message = f"👥 <b>{title}</b>\n\n"
-    for uid, data in filtered[:20]:
-        username = data.get("username", f"ID{uid}")
-        is_online = (now - data.get("last_active", 0)) < 1800
-        status = "🟢" if is_online else "⚫"
-        minutes_ago = int((now - data.get("last_active", 0)) // 60)
-        active_str = "🟢 Онлайн" if is_online else f"⏳ {minutes_ago} мин назад"
-        message += f"{status} {username}\n   🆔 <code>{uid}</code> | {active_str}\n\n"
-    if len(filtered) > 20:
-        message += f"... и ещё {len(filtered) - 20} пользователей"
-    keyboard = [
-        [InlineKeyboardButton("🟢 Онлайн", callback_data="users_online"), InlineKeyboardButton("⚫ Оффлайн", callback_data="users_offline")],
-        [InlineKeyboardButton("📊 Все", callback_data="users_all")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="back")],
-    ]
-    await query.edit_message_text(message, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
-
-# ═══════════════════════════════════════
-#  СТАТУС СЕРВЕРА (ПИНГ)
-# ═══════════════════════════════════════
-async def server_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if not is_admin(query.from_user.id):
-        await query.edit_message_text("❌ Только для админа!")
-        return
-    
-    await query.edit_message_text("⏳ Проверка статуса сервера...")
-    
-    try:
-        start_ping = time.time()
-        
-        response = requests.get(f"{SERVER_URL}/list", timeout=10)
-        ping = round((time.time() - start_ping) * 1000)
-        
-        if response.status_code == 200:
-            data = response.json()
-            total_keys = len(data)
-            active_keys = sum(1 for k in data if k.get("active", False))
-            
-            message = f"📊 <b>СТАТУС СЕРВЕРА</b>\n\n"
-            message += f"🌐 Сервер: {SERVER_URL}\n"
-            message += f"📡 Пинг: <b>{ping} мс</b>\n"
-            message += f"✅ Статус: <b>🟢 Онлайн</b>\n\n"
-            message += f"🔑 Всего ключей: {total_keys}\n"
-            message += f"✅ Активных: {active_keys}\n"
-            message += f"❌ Неактивных: {total_keys - active_keys}\n\n"
-            message += f"📅 Проверено: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"
-            
-            keyboard = [[InlineKeyboardButton("🔄 Обновить", callback_data="server_status")],
-                        [InlineKeyboardButton("🔙 Назад", callback_data="back")]]
-            await query.edit_message_text(message, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
-            log_action(f"Админ {query.from_user.id} проверил статус сервера (пинг: {ping}мс)")
-        else:
-            await query.edit_message_text(f"❌ Сервер вернул ошибку: {response.status_code}")
-            
-    except requests.exceptions.Timeout:
-        await query.edit_message_text("❌ Сервер не отвечает (таймаут 10с)")
-    except requests.exceptions.ConnectionError:
-        await query.edit_message_text("❌ Нет соединения с сервером!")
-    except Exception as e:
-        await query.edit_message_text(f"❌ Ошибка: {str(e)}")
-      # ═══════════════════════════════════════
-#  ПОИСК ПОЛЬЗОВАТЕЛЯ (АДМИН)
+#  ПОИСК, РАССЫЛКА, БАН-ЛИСТ (ЧАСТЬ 1)
 # ═══════════════════════════════════════
 async def find_user_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1284,9 +1079,6 @@ async def handle_find_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(message, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     log_action(f"Админ {user_id} искал пользователя: {query_text}")
 
-# ═══════════════════════════════════════
-#  РАССЫЛКА (АДМИН)
-# ═══════════════════════════════════════
 async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1323,9 +1115,6 @@ async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     log_action(f"Админ {user_id} сделал рассылку: {message_text[:50]}...")
 
-# ═══════════════════════════════════════
-#  БАН-ЛИСТ (АДМИН)
-# ═══════════════════════════════════════
 async def ban_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1425,8 +1214,8 @@ async def banned_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message += f"• {username} (<code>{uid}</code>)\n"
     keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="ban_menu")]]
     await query.edit_message_text(message, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
-  # ═══════════════════════════════════════
-#  БЭКАП КЛЮЧЕЙ (АДМИН)
+# ═══════════════════════════════════════
+#  БЭКАП, СТАТУС БОТА, НАЗАД, MAIN (ЧАСТЬ 2)
 # ═══════════════════════════════════════
 async def backup_keys(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1457,9 +1246,6 @@ async def backup_keys(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await query.edit_message_text(f"❌ Ошибка: {str(e)}")
 
-# ═══════════════════════════════════════
-#  СТАТУС БОТА (АДМИН)
-# ═══════════════════════════════════════
 async def bot_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1533,6 +1319,7 @@ async def back(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("⚙️ Настройка задержки", callback_data="cooldown_settings")],
             [InlineKeyboardButton("💾 Бэкап ключей", callback_data="backup_keys")],
             [InlineKeyboardButton("📊 Статус сервера", callback_data="server_status")],
+            [InlineKeyboardButton("📊 Активации ключей", callback_data="key_stats_admin")],
             [InlineKeyboardButton("ℹ️ Инфо о ключе", callback_data="info_key")],
             [InlineKeyboardButton("📤 Отправить ключ", callback_data="send_key")],
         ]
@@ -1552,7 +1339,7 @@ async def back(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
-            f"🤖 Добро пожаловать, Гитлер!\n\n"
+            f"🤖 Добро пожаловать, Реселлер!\n\n"
             f"✅ Генерировать ключи (до 30 дней, задержка {cooldown_min} мин)\n"
             f"✅ Создавать кастомные ключи (до 67 дней, задержка {cooldown_min} мин)\n"
             f"✅ Смотреть свои ключи\n"
@@ -1574,12 +1361,12 @@ async def back(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #  MAIN
 # ═══════════════════════════════════════
 def main():
+    load_stats()
+    
     application = Application.builder().token(TOKEN).build()
     
-    # Command handlers
     application.add_handler(CommandHandler("start", start))
     
-    # Callback query handlers
     application.add_handler(CallbackQueryHandler(get_free_key, pattern="^get_free_key$"))
     application.add_handler(CallbackQueryHandler(generate_key, pattern="^generate$"))
     application.add_handler(CallbackQueryHandler(generate_callback, pattern="^gen_"))
@@ -1619,9 +1406,10 @@ def main():
     application.add_handler(CallbackQueryHandler(backup_keys, pattern="^backup_keys$"))
     application.add_handler(CallbackQueryHandler(bot_status, pattern="^bot_status$"))
     application.add_handler(CallbackQueryHandler(server_status, pattern="^server_status$"))
+    application.add_handler(CallbackQueryHandler(key_stats_admin, pattern="^key_stats_admin$"))
+    application.add_handler(CallbackQueryHandler(online_players, pattern="^online_players$"))
     application.add_handler(CallbackQueryHandler(back, pattern="^back$"))
     
-    # Message handlers
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_messages))
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
@@ -1657,4 +1445,4 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 if __name__ == "__main__":
     main()
-  
+
