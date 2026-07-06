@@ -178,6 +178,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Выберите тему вопроса:",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
+    )
         # ═══════════════════════════════════════
 #  ВЫБОР ТЕМЫ
 # ═══════════════════════════════════════
