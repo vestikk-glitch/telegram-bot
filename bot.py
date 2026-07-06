@@ -1,15 +1,33 @@
 import json
 import time
 import asyncio
+import threading
+import requests
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 
 # ═══════════════════════════════════════
+#  ПИНГ ДЛЯ RENDER (ЧТОБЫ НЕ ЗАСЫПАЛ)
+# ═══════════════════════════════════════
+BOT_URL = "https://telegram-bot-4exc.onrender.com"  # ⚠️ ЗАМЕНИ НА СВОЙ URL!
+
+def ping_self():
+    while True:
+        try:
+            response = requests.get(BOT_URL, timeout=10)
+            print(f"✅ Пинг успешен! Статус: {response.status_code}")
+        except Exception as e:
+            print(f"❌ Ошибка пинга: {e}")
+        time.sleep(600)  # 10 минут
+
+threading.Thread(target=ping_self, daemon=True).start()
+# ═══════════════════════════════════════
 #  НАСТРОЙКИ
 # ═══════════════════════════════════════
 TOKEN = "8946856377:AAHHIh0ye6k18dwQit0d8PaIyvnv6p5O2dg"
 ADMIN_ID = 1745668867
+
 # ═══════════════════════════════════════
 #  СИСТЕМА ТИКЕТОВ (ПОДДЕРЖКА)
 # ═══════════════════════════════════════
@@ -160,8 +178,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Выберите тему вопроса:",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    # ═══════════════════════════════════════
+        # ═══════════════════════════════════════
 #  ВЫБОР ТЕМЫ
 # ═══════════════════════════════════════
 async def ticket_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -271,7 +288,7 @@ async def ticket_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Выберите тему вопроса:",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+        )
     # ═══════════════════════════════════════
 #  СТАТУС ТИКЕТА (ПОЛЬЗОВАТЕЛЬ)
 # ═══════════════════════════════════════
@@ -637,5 +654,7 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 if __name__ == "__main__":
     main()
+    
+    
     
     
